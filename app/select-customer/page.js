@@ -1,14 +1,14 @@
 import FlashMessage from "@/components/FlashMessage";
-import { all } from "@/lib/db";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 import { selectCustomerAction } from "./actions";
 
-export default function SelectCustomerPage({ searchParams }) {
-  const customers = all(
-    `SELECT customer_id, full_name, email
-     FROM customers
-     ORDER BY full_name
-     LIMIT 1000`,
-  );
+export default async function SelectCustomerPage({ searchParams }) {
+  const supabase = createSupabaseAdminClient();
+  const { data: customers = [] } = await supabase
+    .from("customers")
+    .select("customer_id, full_name, email")
+    .order("full_name", { ascending: true })
+    .limit(1000);
 
   return (
     <main className="card">

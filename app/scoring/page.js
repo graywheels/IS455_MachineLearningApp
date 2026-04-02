@@ -6,8 +6,8 @@ export default function ScoringPage({ searchParams }) {
     <main className="card">
       <h2>Run Scoring</h2>
       <p>
-        This triggers <code>python jobs/run_inference.py</code>, which writes predictions into
-        <code> order_predictions</code>.
+        This triggers server-side inference and writes predictions into
+        <code> order_predictions</code> in Supabase.
       </p>
       <FlashMessage searchParams={searchParams} />
       <form action={runScoringAction}>

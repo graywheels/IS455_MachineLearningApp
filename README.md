@@ -33,11 +33,27 @@ npm run dev
 
 - <http://localhost:3000/select-customer>
 
+## Supabase + Vercel deployment
+
+1. Create a Supabase project.
+2. In Supabase SQL Editor, run `supabase/schema.sql`.
+3. Set environment variables locally and in Vercel:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` (or `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
+   - `SUPABASE_SERVICE_ROLE_KEY` (server-side only)
+4. Import SQLite data into Supabase:
+
+```bash
+npm run import:supabase
+```
+
+5. In Vercel, connect this GitHub repo and set the same env vars.
+
 ## Notes on database contract
 
-- Uses existing tables in `shop.db`: `customers`, `orders`, `order_items`, `products`.
-- Priority queue expects `order_predictions` to already exist (from your ML pipeline).
-- This DB uses `full_name`, `order_datetime`, and `order_total` instead of the prompt's default names.
+- App uses existing operational tables: `customers`, `orders`, `order_items`, `products`, `order_predictions`.
+- Current schema uses `full_name`, `order_datetime`, and `order_total`.
+- The Run Scoring page writes/upserts predictions into `order_predictions` keyed by `order_id`.
 
 ## Run scoring manually
 

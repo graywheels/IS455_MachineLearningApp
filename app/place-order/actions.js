@@ -1,8 +1,8 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { all, get, inTransaction, run } from "@/lib/db";
 import { getSelectedCustomerId } from "@/lib/customer";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 
 function toInt(value) {
   const n = Number(value);
@@ -30,6 +30,7 @@ function nowSqlTimestamp() {
 export async function placeOrderAction(formData) {
   const customerId = await getSelectedCustomerId();
   if (!customerId) redirect("/select-customer");
+  const supabase = createSupabaseAdminClient();
 
   const productIds = formData.getAll("product_id");
   const quantities = formData.getAll("quantity");
@@ -47,78 +48,76 @@ export async function placeOrderAction(formData) {
     redirect("/place-order?status=error&message=Add%20at%20least%20one%20valid%20line%20item");
   }
 
-  const productMap = new Map(
-    all(
-      `SELECT product_id, product_name, price
-       FROM products
-       WHERE product_id IN (${rows.map(() => "?").join(",")})`,
-      rows.map((r) => r.productId),
-    ).map((p) => [p.product_id, p]),
-  );
+  const { data: products = [] } = await supabase
+    .from("products")
+    .select("product_id, product_name, price")
+    .in("product_id", rows.map((r) => r.productId));
+  const productMap = new Map(products.map((p) => [p.product_id, p]));
 
   if (productMap.size === 0) {
     redirect("/place-order?status=error&message=No%20matching%20products%20found");
   }
 
-  const customer = get(
-    `SELECT zip_code, state
-     FROM customers
-     WHERE customer_id = ?`,
-    [customerId],
-  );
+  const { data: customer } = await supabase
+    .from("customers")
+    .select("zip_code, state")
+    .eq("customer_id", customerId)
+    .maybeSingle();
 
-  const result = inTransaction(() => {
-    let subtotal = 0;
-    const normalizedLines = rows.map(({ productId, quantity }) => {
-      const product = productMap.get(productId);
-      if (!product) throw new Error(`Product ${productId} not found`);
-      const unitPrice = Number(product.price);
-      const lineTotal = unitPrice * quantity;
-      subtotal += lineTotal;
-      return { productId, quantity, unitPrice, lineTotal };
-    });
-
-    const shippingFee = subtotal >= 50 ? 0 : 6.99;
-    const taxAmount = subtotal * 0.08;
-    const orderTotal = subtotal + shippingFee + taxAmount;
-
-    const orderInsert = run(
-      `INSERT INTO orders (
-        customer_id, order_datetime, billing_zip, shipping_zip, shipping_state,
-        payment_method, device_type, ip_country, promo_used, promo_code,
-        order_subtotal, shipping_fee, tax_amount, order_total, risk_score, is_fraud
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        customerId,
-        nowSqlTimestamp(),
-        customer?.zip_code ?? null,
-        customer?.zip_code ?? null,
-        customer?.state ?? null,
-        "card",
-        "web",
-        "US",
-        0,
-        null,
-        subtotal,
-        shippingFee,
-        taxAmount,
-        orderTotal,
-        0,
-        0,
-      ],
-    );
-    const orderId = Number(orderInsert.lastInsertRowid);
-
-    for (const line of normalizedLines) {
-      run(
-        `INSERT INTO order_items (order_id, product_id, quantity, unit_price, line_total)
-         VALUES (?, ?, ?, ?, ?)`,
-        [orderId, line.productId, line.quantity, line.unitPrice, line.lineTotal],
-      );
-    }
-
-    return orderId;
+  let subtotal = 0;
+  const normalizedLines = rows.map(({ productId, quantity }) => {
+    const product = productMap.get(productId);
+    if (!product) throw new Error(`Product ${productId} not found`);
+    const unitPrice = Number(product.price);
+    const lineTotal = unitPrice * quantity;
+    subtotal += lineTotal;
+    return { productId, quantity, unitPrice, lineTotal };
   });
 
-  redirect(`/orders?status=success&message=Order%20${result}%20placed%20successfully`);
+  const shippingFee = subtotal >= 50 ? 0 : 6.99;
+  const taxAmount = subtotal * 0.08;
+  const orderTotal = subtotal + shippingFee + taxAmount;
+
+  const { data: insertedOrder, error: insertOrderError } = await supabase
+    .from("orders")
+    .insert({
+      customer_id: customerId,
+      order_datetime: nowSqlTimestamp(),
+      billing_zip: customer?.zip_code ?? null,
+      shipping_zip: customer?.zip_code ?? null,
+      shipping_state: customer?.state ?? null,
+      payment_method: "card",
+      device_type: "web",
+      ip_country: "US",
+      promo_used: 0,
+      promo_code: null,
+      order_subtotal: subtotal,
+      shipping_fee: shippingFee,
+      tax_amount: taxAmount,
+      order_total: orderTotal,
+      risk_score: 0,
+      is_fraud: 0,
+    })
+    .select("order_id")
+    .single();
+
+  if (insertOrderError || !insertedOrder) {
+    throw new Error(insertOrderError?.message || "Failed to create order");
+  }
+  const orderId = Number(insertedOrder.order_id);
+
+  const { error: lineInsertError } = await supabase.from("order_items").insert(
+    normalizedLines.map((line) => ({
+      order_id: orderId,
+      product_id: line.productId,
+      quantity: line.quantity,
+      unit_price: line.unitPrice,
+      line_total: line.lineTotal,
+    })),
+  );
+  if (lineInsertError) {
+    throw new Error(lineInsertError.message);
+  }
+
+  redirect(`/orders?status=success&message=Order%20${orderId}%20placed%20successfully`);
 }

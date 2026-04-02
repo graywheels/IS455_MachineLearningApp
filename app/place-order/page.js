@@ -1,19 +1,19 @@
 import { redirect } from "next/navigation";
 import FlashMessage from "@/components/FlashMessage";
-import { all } from "@/lib/db";
 import { getSelectedCustomerId } from "@/lib/customer";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 import { placeOrderAction } from "./actions";
 
 export default async function PlaceOrderPage({ searchParams }) {
   const customerId = await getSelectedCustomerId();
   if (!customerId) redirect("/select-customer");
+  const supabase = createSupabaseAdminClient();
 
-  const products = all(
-    `SELECT product_id, product_name, price
-     FROM products
-     WHERE is_active = 1
-     ORDER BY product_name`,
-  );
+  const { data: products = [] } = await supabase
+    .from("products")
+    .select("product_id, product_name, price")
+    .eq("is_active", 1)
+    .order("product_name", { ascending: true });
 
   return (
     <main className="card">

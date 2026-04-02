@@ -1,20 +1,19 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import FlashMessage from "@/components/FlashMessage";
-import { all } from "@/lib/db";
 import { getSelectedCustomerId } from "@/lib/customer";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 
 export default async function OrdersPage({ searchParams }) {
   const customerId = await getSelectedCustomerId();
   if (!customerId) redirect("/select-customer");
+  const supabase = createSupabaseAdminClient();
 
-  const orders = all(
-    `SELECT order_id, order_datetime, 0 AS fulfilled, order_total
-     FROM orders
-     WHERE customer_id = ?
-     ORDER BY order_datetime DESC`,
-    [customerId],
-  );
+  const { data: orders = [] } = await supabase
+    .from("orders")
+    .select("order_id, order_datetime, order_total")
+    .eq("customer_id", customerId)
+    .order("order_datetime", { ascending: false });
 
   return (
     <main className="card">
@@ -36,7 +35,7 @@ export default async function OrdersPage({ searchParams }) {
                 <Link href={`/orders/${order.order_id}`}>{order.order_id}</Link>
               </td>
               <td>{order.order_datetime}</td>
-              <td>{order.fulfilled}</td>
+              <td>0</td>
               <td>${Number(order.order_total).toFixed(2)}</td>
             </tr>
           ))}

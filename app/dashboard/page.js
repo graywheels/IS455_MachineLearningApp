@@ -1,36 +1,34 @@
 import { redirect } from "next/navigation";
-import { all, get } from "@/lib/db";
 import { getSelectedCustomerId } from "@/lib/customer";
+import { createSupabaseAdminClient } from "@/lib/supabase";
 
 export default async function DashboardPage() {
   const customerId = await getSelectedCustomerId();
   if (!customerId) redirect("/select-customer");
+  const supabase = createSupabaseAdminClient();
 
-  const customer = get(
-    `SELECT customer_id, full_name, email
-     FROM customers
-     WHERE customer_id = ?`,
-    [customerId],
-  );
+  const { data: customer } = await supabase
+    .from("customers")
+    .select("customer_id, full_name, email")
+    .eq("customer_id", customerId)
+    .maybeSingle();
   if (!customer) redirect("/select-customer?status=error&message=Customer%20not%20found");
 
-  const totals = get(
-    `SELECT
-       COUNT(*) AS total_orders,
-       COALESCE(SUM(order_total), 0) AS total_spend
-     FROM orders
-     WHERE customer_id = ?`,
-    [customerId],
-  );
+  const { data: ordersForTotals = [] } = await supabase
+    .from("orders")
+    .select("order_total")
+    .eq("customer_id", customerId);
+  const totals = {
+    total_orders: ordersForTotals.length,
+    total_spend: ordersForTotals.reduce((sum, o) => sum + Number(o.order_total || 0), 0),
+  };
 
-  const recentOrders = all(
-    `SELECT order_id, order_datetime, 0 AS fulfilled, order_total
-     FROM orders
-     WHERE customer_id = ?
-     ORDER BY order_datetime DESC
-     LIMIT 5`,
-    [customerId],
-  );
+  const { data: recentOrders = [] } = await supabase
+    .from("orders")
+    .select("order_id, order_datetime, order_total")
+    .eq("customer_id", customerId)
+    .order("order_datetime", { ascending: false })
+    .limit(5);
 
   return (
     <main>
@@ -59,7 +57,7 @@ export default async function DashboardPage() {
               <tr key={order.order_id}>
                 <td>{order.order_id}</td>
                 <td>{order.order_datetime}</td>
-                <td>{order.fulfilled}</td>
+                <td>0</td>
                 <td>${Number(order.order_total).toFixed(2)}</td>
               </tr>
             ))}

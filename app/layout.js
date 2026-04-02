@@ -7,6 +7,8 @@ export const metadata = {
   description: "Operational app on shop.db",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
