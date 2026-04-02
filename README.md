@@ -47,6 +47,26 @@ python jobs/run_inference.py
 
 Expected stdout pattern includes `scored=<number>` so the app can display count.
 
+## Scheduled pipeline jobs (17.7 style)
+
+This repo now includes:
+
+- `jobs/config.py`
+- `jobs/utils_db.py`
+- `jobs/etl_build_warehouse.py`
+- `jobs/train_model.py`
+- `jobs/run_inference.py`
+
+Run in order:
+
+```bash
+python jobs/etl_build_warehouse.py
+python jobs/train_model.py
+python jobs/run_inference.py
+```
+
+Artifacts are written to `artifacts/` and warehouse data to `data/warehouse.db`.
+
 ## Manual QA checklist
 
 - Select customer on `/select-customer`.

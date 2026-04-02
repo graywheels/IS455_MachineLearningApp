@@ -45,6 +45,9 @@ export async function runScoringAction() {
     const msg = scoredCount == null ? `Scoring completed at ${ts}` : `Scoring completed: scored=${scoredCount} at ${ts}`;
     redirect(`/warehouse/priority?status=success&message=${encodeURIComponent(msg)}`);
   } catch (error) {
+    if (error?.digest?.startsWith?.("NEXT_REDIRECT")) {
+      throw error;
+    }
     const msg = `Scoring failed: ${error.message}`;
     redirect(`/scoring?status=error&message=${encodeURIComponent(msg)}`);
   }

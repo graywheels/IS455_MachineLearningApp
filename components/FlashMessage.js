@@ -1,6 +1,7 @@
-export default function FlashMessage({ searchParams }) {
-  const status = searchParams?.status;
-  const message = searchParams?.message;
+export default async function FlashMessage({ searchParams }) {
+  const params = await searchParams;
+  const status = params?.status;
+  const message = params?.message;
   if (!status || !message) return null;
 
   return (

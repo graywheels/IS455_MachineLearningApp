@@ -138,3 +138,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .DS_Store
+.python_packages/
+artifacts/
+data/warehouse.db
+jobs/__pycache__/
