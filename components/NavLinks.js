@@ -10,6 +10,7 @@ const links = [
   { href: "/orders", label: "View Order History", step: 4 },
   { href: "/scoring", label: "Run Scoring", step: 5 },
   { href: "/warehouse/priority", label: "Check Priority Queue", step: 6 },
+  { href: "/admin/orders", label: "Admin: All Orders", step: "★" },
 ];
 
 export default function NavLinks() {

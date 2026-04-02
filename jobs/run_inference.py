@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Fraud inference job — reads shop.db, scores every order, writes to order_predictions.
+
+Stdout contract (parsed by app/scoring/actions.js):
+  scored=<n>
+  method=<model|fallback>
+  timestamp=<YYYY-MM-DD HH:MM:SS>
+"""
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,124 +28,152 @@ except Exception:  # noqa: BLE001
 from config import MODEL_PATH, OP_DB_PATH
 from utils_db import ensure_predictions_table, sqlite_conn
 
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
+# Decision threshold stored alongside the model artifact.
+# Fallback value matches the JS scorer in app/scoring/actions.js.
+DEFAULT_THRESHOLD = 0.35
 
 
 def now_mst_string() -> str:
     return datetime.now(ZoneInfo("America/Phoenix")).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ── Data loading ──────────────────────────────────────────────────────────────
+
 def load_live_df(conn):
+    """Flatten orders + customers + order_items into the fraud feature matrix."""
     orders = pd.read_sql(
         """
-        SELECT order_id, customer_id, order_datetime, COALESCE(order_total, 0) AS total_value
-        FROM orders
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.order_datetime,
+            o.billing_zip,
+            o.shipping_zip,
+            o.payment_method,
+            o.device_type,
+            o.ip_country,
+            COALESCE(o.promo_used, 0)       AS promo_used,
+            COALESCE(o.order_subtotal, 0)   AS order_subtotal,
+            COALESCE(o.shipping_fee, 0)     AS shipping_fee,
+            COALESCE(o.tax_amount, 0)       AS tax_amount,
+            COALESCE(o.order_total, 0)      AS order_total,
+            COALESCE(o.risk_score, 0)       AS risk_score,
+            c.customer_segment,
+            c.loyalty_tier,
+            COALESCE(c.is_active, 1)        AS is_active
+        FROM orders o
+        JOIN customers c ON o.customer_id = c.customer_id
         """,
         conn,
     )
-    customers = pd.read_sql("SELECT customer_id, birthdate FROM customers", conn)
-    order_items = pd.read_sql("SELECT order_id, quantity FROM order_items", conn)
 
-    item_features = (
-        order_items.groupby("order_id", as_index=False)
-        .agg(num_items=("quantity", "sum"))
+    item_stats = pd.read_sql(
+        """
+        SELECT
+            order_id,
+            SUM(quantity)                AS total_items,
+            AVG(unit_price)              AS avg_unit_price,
+            MAX(unit_price)              AS max_unit_price,
+            COUNT(DISTINCT product_id)   AS distinct_products
+        FROM order_items
+        GROUP BY order_id
+        """,
+        conn,
     )
-    order_counts = (
-        orders.groupby("customer_id", as_index=False)
-        .agg(customer_order_count=("order_id", "count"))
-    )
 
-    df = orders.merge(customers, on="customer_id", how="left").merge(item_features, on="order_id", how="left")
-    df = df.merge(order_counts, on="customer_id", how="left")
-    df["num_items"] = df["num_items"].fillna(0)
-    df["avg_weight"] = None  # placeholder to match training feature schema
+    df = orders.merge(item_stats, on="order_id", how="left")
+    for col in ("total_items", "avg_unit_price", "max_unit_price", "distinct_products"):
+        df[col] = df[col].fillna(0)
 
+    # Feature engineering — must match model_training.ipynb exactly
     df["order_datetime"] = pd.to_datetime(df["order_datetime"], errors="coerce")
-    df["birthdate"] = pd.to_datetime(df["birthdate"], errors="coerce")
-    df["customer_age"] = datetime.now().year - df["birthdate"].dt.year
-    df["order_dow"] = df["order_datetime"].dt.dayofweek
-    df["order_month"] = df["order_datetime"].dt.month
+    df["order_hour"]       = df["order_datetime"].dt.hour.fillna(12).astype(int)
+    df["order_dayofweek"]  = df["order_datetime"].dt.dayofweek.fillna(0).astype(int)
+    df["is_weekend_order"] = (df["order_dayofweek"] >= 5).astype(int)
+    df["is_late_night"]    = df["order_hour"].between(0, 5).astype(int)
+    df["zip_mismatch"]     = (df["billing_zip"] != df["shipping_zip"]).astype(int)
+    df["foreign_ip"]       = (df["ip_country"] != "US").astype(int)
+
+    p95 = df["order_total"].quantile(0.95)
+    df["high_value_order"] = (df["order_total"] > p95).astype(int)
+    df["shipping_ratio"]   = df["shipping_fee"] / df["order_total"].replace(0, float("nan"))
+
     return df
 
 
-def score_with_fallback(row: dict) -> tuple[float, int]:
-    # Deterministic backup scorer when model artifacts or dependencies are unavailable.
-    prob = 0.06
-    prob += min(row["total_value"] / 900.0, 0.5)
-    prob += min(row["num_items"] / 50.0, 0.2)
-    if row["customer_order_count"] <= 2:
-        prob += 0.06
-    if row["order_dow"] in (4, 5, 6):
-        prob += 0.04
-    prob = clamp(prob, 0.01, 0.99)
-    return prob, int(prob >= 0.5)
+# ── Fallback scorer (no sklearn / no model artifact) ─────────────────────────
 
+def _fraud_fallback(row: dict) -> tuple[float, int]:
+    """Logistic-regression–inspired fraud scorer using raw features."""
+    logit = -3.8
+    logit += min(float(row.get("risk_score", 0)), 1.0) * 4.0
+    if row.get("billing_zip") != row.get("shipping_zip"):
+        logit += 0.9
+    if row.get("ip_country") != "US":
+        logit += 1.3
+    if row.get("promo_used"):
+        logit += 0.35
+    if float(row.get("max_unit_price", 0)) > 200:
+        logit += 0.4
+    pay = str(row.get("payment_method") or "").lower()
+    if pay == "prepaid_card":
+        logit += 0.9
+    elif pay == "cryptocurrency":
+        logit += 1.1
+    prob = max(0.01, min(0.99, 1 / (1 + math.exp(-logit))))
+    return prob, int(prob >= DEFAULT_THRESHOLD)
+
+
+def _fallback_score_all(live_df) -> list[tuple[int, float, int]]:
+    results = []
+    for row in live_df.to_dict(orient="records"):
+        prob, pred = _fraud_fallback(row)
+        results.append((int(row["order_id"]), prob, pred))
+    return results
+
+
+# ── Model scorer ──────────────────────────────────────────────────────────────
 
 def score_with_model_if_available(live_df) -> tuple[list[tuple[int, float, int]], str]:
     if joblib is None or not MODEL_PATH.exists():
-        method = "fallback"
-        scored = []
-        for row in live_df.to_dict(orient="records"):
-            prob, pred = score_with_fallback(
-                {
-                    "total_value": float(row["total_value"]),
-                    "num_items": float(row["num_items"]),
-                    "customer_order_count": float(row["customer_order_count"]),
-                    "order_dow": row["order_dow"],
-                }
-            )
-            scored.append((int(row["order_id"]), prob, pred))
-        return scored, method
+        return _fallback_score_all(live_df), "fallback"
 
     try:
-        model = joblib.load(str(MODEL_PATH))
-        X_live = live_df[
-            [
-                "num_items",
-                "total_value",
-                "customer_age",
-                "order_dow",
-                "order_month",
-                "customer_order_count",
-            ]
-        ]
-        probs = model.predict_proba(X_live)[:, 1]
-        preds = model.predict(X_live)
+        artifact   = joblib.load(str(MODEL_PATH))
+        pipeline   = artifact["pipeline"]
+        threshold  = artifact.get("decision_threshold", DEFAULT_THRESHOLD)
+        all_cols   = artifact["all_input_columns"]
+
+        X_live = live_df[all_cols]
+        probs  = pipeline.predict_proba(X_live)[:, 1]
+        preds  = (probs >= threshold).astype(int)
+
         scored = [
             (int(oid), float(p), int(yhat))
             for oid, p, yhat in zip(live_df["order_id"], probs, preds)
         ]
         return scored, "model"
-    except Exception as exc:  # noqa: BLE001
-        print(f"warning: model scoring failed, using fallback ({exc})", file=sys.stderr)
-        scored = []
-        for row in live_df.to_dict(orient="records"):
-            prob, pred = score_with_fallback(
-                {
-                    "total_value": float(row["total_value"]),
-                    "num_items": float(row["num_items"]),
-                    "customer_order_count": float(row["customer_order_count"]),
-                    "order_dow": row["order_dow"],
-                }
-            )
-            scored.append((int(row["order_id"]), prob, pred))
-        return scored, "fallback"
 
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: fraud model failed, using fallback ({exc})", file=sys.stderr)
+        return _fallback_score_all(live_df), "fallback"
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     if pd is None:
-        print("error: pandas is required for inference", file=sys.stderr)
+        print("error: pandas is required — run: pip install -r requirements.txt", file=sys.stderr)
         return 1
     if not OP_DB_PATH.exists():
-        print(f"error: missing database at {OP_DB_PATH}", file=sys.stderr)
+        print(f"error: database not found at {OP_DB_PATH}", file=sys.stderr)
         return 1
 
     try:
         with sqlite_conn(OP_DB_PATH) as conn:
             ensure_predictions_table(conn)
             live_df = load_live_df(conn)
+
             if live_df.empty:
                 print("scored=0")
                 print("method=none")
@@ -148,7 +185,7 @@ def main() -> int:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO order_predictions
-                (order_id, late_delivery_probability, predicted_late_delivery, prediction_timestamp)
+                    (order_id, fraud_probability, predicted_fraud, prediction_timestamp)
                 VALUES (?, ?, ?, ?)
                 """,
                 [(order_id, prob, pred, ts) for order_id, prob, pred in scored_rows],
@@ -159,6 +196,7 @@ def main() -> int:
         print(f"method={method}")
         print(f"timestamp={ts}")
         return 0
+
     except Exception as exc:  # noqa: BLE001
         print(f"error: {exc}", file=sys.stderr)
         return 1
